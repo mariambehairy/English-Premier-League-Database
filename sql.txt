@@ -1,0 +1,186 @@
+CREATE PROCEDURE SendEmail
+    @TransactionStatus NVARCHAR(50)
+AS
+BEGIN
+    -- Variables
+    DECLARE @Subject NVARCHAR(255);
+    DECLARE @Body NVARCHAR(MAX);
+    DECLARE @Recipient NVARCHAR(255) = 'ziyadalfikie@gmail.com';
+    DECLARE @ProfileName NVARCHAR(255) = 'Email';
+
+    -- Check if mail profile exists
+    IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysmail_profile WHERE [name] = @ProfileName)
+    BEGIN
+        -- If not, create the mail profile
+        EXEC msdb.dbo.sysmail_add_profile_sp
+            @profile_name = @ProfileName,
+            @description = 'Test Mail Profile';
+    END
+
+    -- Set subject and body based on transaction status
+    IF @TransactionStatus = 'Successful'
+    BEGIN
+        SET @Subject = 'Transaction Successful';
+        SET @Body = 'The transaction was successful.';
+    END
+    ELSE
+    BEGIN
+        SET @Subject = 'Transaction Failed';
+        SET @Body = 'The transaction failed';
+    END
+
+    -- Send Email
+    EXEC msdb.dbo.sp_send_dbmail
+        @profile_name = @ProfileName,
+        @recipients = @Recipient,
+        @subject = @Subject,
+        @body = @Body,
+        @body_format = 'TEXT'
+END;
+
+
+
+
+CREATE PROCEDURE InsertDataFiles1
+    @teamsFile NVARCHAR(MAX),
+	@gamesFile NVARCHAR(MAX),
+	@playerFile NVARCHAR(MAX),
+	@ImportResult NVARCHAR(50) OUTPUT
+AS
+BEGIN
+	SET @ImportResult = 'Failed';
+	BEGIN TRY
+        BEGIN TRANSACTION;
+    -- Declare temporary tables to hold data from the files
+		CREATE TABLE #TeamsTemp (
+			Pos INT,
+			Team NVARCHAR(256),
+			Pld INT,
+			W INT,
+			D INT,
+			L INT,
+			GF INT,
+			GA INT,
+			GD INT,
+			Pts INT
+		);
+
+		CREATE TABLE #FootballTemp (
+		    Date DATETIME,
+		    HomeTeam NVARCHAR(256),
+			AwayTeam NVARCHAR(256),
+			Result NVARCHAR(MAX)
+		);
+
+		CREATE TABLE #PlayerData (
+		Team NVARCHAR(256),
+		JerseyNo INT,
+		Player NVARCHAR(256),
+		Position NVARCHAR(50),
+		Appearances INT,
+		Substitutions INT,
+		Goals INT,
+		Penalties INT,
+		YellowCards NVARCHAR(256),
+		RedCards NVARCHAR(256)
+	);	
+
+    -- Build and execute dynamic SQL for BULK INSERT for teams data
+		DECLARE @sql NVARCHAR(MAX);
+		SET @sql = '
+		    BULK INSERT #TeamsTemp 
+		    FROM ''' + @teamsFile + '''
+		    WITH (
+		        FIELDTERMINATOR = '','',
+		        ROWTERMINATOR = ''\n'',
+		        FIRSTROW = 2  -- Skip header row if it exists
+		    )';
+		EXEC sp_executesql @sql;
+			
+    -- Build and execute dynamic SQL for BULK INSERT for football data
+		DECLARE @sqlFootball NVARCHAR(MAX);
+		SET @sqlFootball = '
+		    BULK INSERT #FootballTemp 
+		    FROM ''' + @gamesFile + '''
+		    WITH (
+		        FIELDTERMINATOR = '','',
+		        ROWTERMINATOR = ''\n'',
+		        FIRSTROW = 2  -- Skip header row if it exists
+		    )';
+		EXEC sp_executesql @sqlFootball;
+
+		DECLARE @sql2 NVARCHAR(MAX);
+		SET @sql2 = '
+		    BULK INSERT #PlayerData
+		    FROM ''' + @playerFile + '''
+		    WITH (
+		        FIELDTERMINATOR = '','',
+		        ROWTERMINATOR = ''\n'',
+		        FIRSTROW = 2  -- Skip header row if it exists
+		    )';
+		EXEC sp_executesql @sql2;
+		
+		delete from PLAYER_PERFORMANCE
+		delete from PLAYERS
+		delete from GAMES
+		delete from TEAM_PERFORMANCE
+		delete from TEAMS
+			
+    -- Insert data into the TEAMS table from #TeamsTemp
+		INSERT INTO TEAMS (TNAME, PLAYEDM, TPOSITION)
+		SELECT Team, Pld, Pos
+		FROM #TeamsTemp;
+			
+	-- Assuming TNAME is a foreign key referencing the TNAME column in TEAMS table
+
+
+
+
+		INSERT INTO [dbo].[TEAM_PERFORMANCE] ( TNAME, W, D, L, GF, GA, GD, PTS)
+			SELECT Team, W, D, L, GF, GA, GD, Pts
+			FROM #TeamsTemp;
+			
+
+
+		INSERT INTO GAMES (Date, HomeTeam, RESULT, AwayTeam,TNAME)
+		SELECT
+		   Date,HomeTeam,AwayTeam,Result,l.TNAME
+		FROM #FootballTemp j,[dbo].[TEAM_PERFORMANCE] l Where l.TNAME = j.HomeTeam 
+	
+
+
+		INSERT INTO players ([NAME], [TEAM], [JERESY_NO], [POSITION])
+		SELECT 
+			Player AS [NAME],
+			Team AS [TEAM],
+			JerseyNo AS [JERESY_NO],
+			Position AS [POSITION]
+			FROM #PlayerData; 
+		
+		INSERT INTO PLAYER_PERFORMANCE ([APEARANCE], SUBSTITUTIONS, GOALS, PENALTIES, YELLOW_C, RED_C, NAME)
+			SELECT Appearances, Substitutions, Goals, Penalties, YellowCards, RedCards, Player
+			FROM #PlayerData;
+  -- Drop the temporary tables
+		DROP TABLE #TeamsTemp;
+		DROP TABLE #FootballTemp;
+		DROP TABLE #PlayerData;
+
+		SET @ImportResult = 'Successful'; -- Set the result to 'Successful' if everything is successful
+		Exec SendEmail @TransactionStatus= @ImportResult;
+
+        COMMIT;
+		END TRY
+    BEGIN CATCH
+		Exec SendEmail @TransactionStatus= @ImportResult;
+        IF @@TRANCOUNT > 0
+            ROLLBACK;
+	END CATCH;
+END;
+
+DECLARE @Result NVARCHAR(50);
+
+EXEC InsertDataFiles1
+    @teamsFile = "Z:\Documents\archive\points_table.csv",
+    @gamesFile = "Z:\Documents\archive\all_match_results.csv",
+    @playerFile = "Z:\Documents\all_players_stats.csv",
+    @ImportResult = @Result OUTPUT;
